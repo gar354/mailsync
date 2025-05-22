@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,7 +39,7 @@ type GetContactsResult struct {
 	} `json:"next"`
 }
 
-func queryEmailOctopus(authKey string, listID string, rows pgx.Rows) {
+func SuscribeEmailsFromDB(authKey string, listID string, rows pgx.Rows) {
 	const chunkSize = 50
 	var chunk []UpsertContactPayload
 
@@ -75,7 +73,12 @@ func processChunk(chunk []UpsertContactPayload, authKey, listID string) {
 		wg.Add(1)
 		go func(c UpsertContactPayload) {
 			defer wg.Done()
-			upsertEmail(authKey, c, listID)
+			err := retryRequest(3, func() error {
+				return upsertEmail(authKey, c, listID)
+			}, time.Second*10)
+			if err != nil {
+				log.Printf("Error processing contact: %v", c)
+			}
 		}(contact)
 	}
 
@@ -91,86 +94,107 @@ type ListInfo struct {
 	} `json:"counts"`
 }
 
-func getListInfo(authKey string, listID string) ListInfo {
+func getListInfo(authKey string, listID string) (ListInfo, error) {
 
 	url := fmt.Sprintf("https://api.emailoctopus.com/lists/%s", listID)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		log.Fatalf("Error: unable to create request %v", err)
+		return ListInfo{}, fmt.Errorf("unable to create request: %v", err)
 	}
 
 	req.Header.Add("Authorization", getAuthReq(authKey))
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Fatalf("Error: recieving request: %v", err)
+		return ListInfo{}, fmt.Errorf("unable to make request: %v", err)
 	}
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Fatalf("Error reading request response: %v", err)
+		return ListInfo{}, fmt.Errorf("unable to read request: %v", err)
 	}
 	var ret ListInfo
 	if res.StatusCode != http.StatusOK {
-		log.Println(string(body))
-		log.Fatalf("Error in request response: %v", err)
+		return ListInfo{}, fmt.Errorf("request for list info returned status code: %d, request body: %s", res.StatusCode, string(body))
 	}
 	err = json.Unmarshal(body, &ret)
 	if err != nil {
-		log.Fatalf("Error unmarshaling JSON %v", err)
+		return ListInfo{}, fmt.Errorf("unable to unmarshal JSON from %s, error: %v", body, err)
 	}
 	res.Body.Close()
-	return ret
+	return ret, nil
 }
 
-func getChunk(authKey string, listID string) GetContactsResult {
+func getChunk(authKey string, listID string) (GetContactsResult, error) {
 	url := fmt.Sprintf("https://api.emailoctopus.com/lists/%s/contacts", listID)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		log.Fatalf("Error: unable to create request %v", err)
+		return GetContactsResult{}, fmt.Errorf("unable to create request: %v", err)
 	}
 
 	req.Header.Add("Authorization", getAuthReq(authKey))
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Fatalf("Error: recieving request: %v", err)
+		return GetContactsResult{}, fmt.Errorf("unable to make request: %v", err)
 	}
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		log.Fatalf("Error reading request response: %v", err)
+		return GetContactsResult{}, fmt.Errorf("unable to read request: %v", err)
 	}
 	var ret GetContactsResult
 	if res.StatusCode != http.StatusOK {
-		log.Println(string(body))
-		log.Fatalf("Error in getChunck request response: %v", err)
+		return GetContactsResult{}, fmt.Errorf("request for chunk returned status code: %d, request body: %s", res.StatusCode, string(body))
 	}
 	err = json.Unmarshal(body, &ret)
 	if err != nil {
-		log.Fatalf("Error unmarshaling JSON %v", err)
+		return GetContactsResult{}, fmt.Errorf("unable to unmarshal JSON from %s, error: %v", body, err)
 	}
 	res.Body.Close()
-	return ret
+	return ret, nil
 }
 
-func unsubscribeEmails(authKey string, listID string) {
-	info := getListInfo(authKey, listID)
+func UnsubscribeEmails(authKey string, listID string) error {
+	info, err := getListInfo(authKey, listID)
+	if err != nil {
+		return fmt.Errorf("unable to get chunk: %v", err)
+	}
 	subscribed := info.Counts[0].Subscribed
 
 	chunkSize := 100
 
 	for i := 0; i < subscribed; i += chunkSize {
-		chunk := getChunk(authKey, listID)
-		unsubscribeChunk(authKey, listID, chunk.Data)
-
+		chunk, err := getChunk(authKey, listID)
+		if err != nil {
+			return fmt.Errorf("unable to get chunk: %v", err)
+		}
+		err = retryRequest(3, func() error {
+			return unsubscribeChunk(authKey, listID, chunk.Data)
+		}, time.Second*8)
+		if err != nil {
+			return fmt.Errorf("unable to unsubscribe chunk: %v", err)
+		}
 		time.Sleep(time.Second * 3)
 	}
+	return nil
 }
 
-func unsubscribeChunk(authKey string, listID string, arr []Contact) {
+func retryRequest(numRetries int, f func() error, waitTime time.Duration) error {
+	var err error = nil
+	for range numRetries {
+		err = f()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(waitTime)
+	}
+	return fmt.Errorf("retried %d times, got error: %v", numRetries, err)
+}
+
+func unsubscribeChunk(authKey string, listID string, arr []Contact) error {
 	url := fmt.Sprintf("https://api.emailoctopus.com/lists/%s/contacts/batch", listID)
 
 	for i := range arr {
@@ -194,21 +218,20 @@ func unsubscribeChunk(authKey string, listID string, arr []Contact) {
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Fatalf("Error in request response: %v", err)
+		return fmt.Errorf("error in request response: %v", err)
 	}
 	if res.StatusCode != http.StatusOK {
 		body, err := io.ReadAll(res.Body)
 		if err != nil {
-			log.Fatalf("Error reading request response: %v", err)
+			return fmt.Errorf("error reading request response: %v", err)
 		}
-		log.Println(string(body))
-		log.Fatalf("Error in request batch update response: %v", err)
+		return fmt.Errorf("error in request batch update response: %s, error code: %d", string(body), res.StatusCode)
 	}
 
-	res.Body.Close()
+	return res.Body.Close()
 }
 
-func upsertEmail(authKey string, payload UpsertContactPayload, listID string) {
+func upsertEmail(authKey string, payload UpsertContactPayload, listID string) error {
 	url := fmt.Sprintf("https://api.emailoctopus.com/lists/%s/contacts", listID)
 	payload.Status = "subscribed"
 
@@ -217,7 +240,7 @@ func upsertEmail(authKey string, payload UpsertContactPayload, listID string) {
 
 	req, err := http.NewRequest("PUT", url, payloadReader)
 	if err != nil {
-		log.Fatalf("Error creating request: %v", err)
+		return fmt.Errorf("error creating upsert request: %v", err)
 	}
 
 	req.Header.Add("Authorization", getAuthReq(authKey))
@@ -225,25 +248,19 @@ func upsertEmail(authKey string, payload UpsertContactPayload, listID string) {
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Fatalf("Error in request response: %v", err)
+		return fmt.Errorf("error in upsert request response: %v", err)
 	}
 	if res.StatusCode != http.StatusOK {
 		body, err := io.ReadAll(res.Body)
 		if err != nil {
-			log.Fatalf("Error reading request response: %v", err)
+			return fmt.Errorf("error reading request response: %v", err)
 		}
-		log.Println(string(body))
-		log.Fatalf("Error in request response: %v", err)
+		return fmt.Errorf("error in upsert request response, returncode: %d, response body: %s", res.StatusCode, string(body))
 	}
 
-	res.Body.Close()
+	return res.Body.Close()
 }
 
 func getAuthReq(key string) string {
 	return fmt.Sprintf("Bearer %s", key)
-}
-
-func GetMD5Hash(text string) string {
-	hash := md5.Sum([]byte(text))
-	return hex.EncodeToString(hash[:])
 }

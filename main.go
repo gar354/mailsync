@@ -47,7 +47,6 @@ func main() {
 	if err != nil {
 		log.Fatal("Can't load file")
 	}
-	log.Println(string(data))
 
 	mailconfig, err := loadData(data)
 	if err != nil {
@@ -57,11 +56,20 @@ func main() {
 	for _, info := range mailconfig {
 		rows, err := connection.QueryGrades(info.Grades)
 		if err != nil {
-			log.Fatalf("Unable to query grades: %v", err)
+			log.Printf("Unable to query grades: %v", err)
+			continue
 		}
-		unsubscribeEmails(emailOctopusAPIKey, info.ID)
-		queryEmailOctopus(emailOctopusAPIKey, info.ID, rows)
+		err = UnsubscribeEmails(emailOctopusAPIKey, info.ID)
+		if err != nil {
+			log.Printf("unable to unsubscribe emails: %v", err)
+			continue
+		}
+		SuscribeEmailsFromDB(emailOctopusAPIKey, info.ID, rows)
 		rows.Close()
+	}
+	err = connection.DBClose()
+	if err != nil {
+		log.Fatalf("Error closing database connection: %v", err)
 	}
 
 }
