@@ -54,17 +54,25 @@ func main() {
 	}
 
 	for _, info := range mailconfig {
-		rows, err := connection.QueryGrades(info.Grades)
-		if err != nil {
-			log.Printf("Unable to query grades: %v", err)
-			continue
-		}
+		log.Printf("Unsubscribing Emails: %s", info.Name)
 		err = UnsubscribeEmails(emailOctopusAPIKey, info.ID)
 		if err != nil {
 			log.Printf("unable to unsubscribe emails: %v", err)
 			continue
 		}
+		rows, err := connection.QueryGrades(info.Grades)
+		if err != nil {
+			log.Printf("Unable to query grades: %v", err)
+			continue
+		}
+		log.Printf("Subscribing Emails: %s", info.Name)
 		SuscribeEmailsFromDB(emailOctopusAPIKey, info.ID, rows)
+		log.Printf("Cleaning Unsubscribed Emails: %s", info.Name)
+		err = CleanUnsubscribedEmails(emailOctopusAPIKey, info.ID)
+		if err != nil {
+			log.Printf("Unable to clean unsubcribed emails: %v", err)
+			continue
+		}
 		rows.Close()
 	}
 	err = connection.DBClose()

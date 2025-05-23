@@ -24,7 +24,7 @@ func DBConnect(connUrl string) (DBState, error) {
 
 func (db DBState) QueryGrades(grades []int32) (pgx.Rows, error) {
 	rows, err := db.Conn.Query(*db.Ctx,
-		`SELECT email FROM parents WHERE grade && $1`, grades)
+		`SELECT email, first_name, last_name FROM parents WHERE grade && $1`, grades)
 	if err != nil {
 		return nil, err
 	}
