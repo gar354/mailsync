@@ -44,10 +44,6 @@ func main() {
 		log.Fatal("Can't read file:", err)
 	}
 
-	if err != nil {
-		log.Fatal("Can't load file")
-	}
-
 	mailconfig, err := loadData(data)
 	if err != nil {
 		log.Fatalf("can't load data %v", err)

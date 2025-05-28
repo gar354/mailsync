@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -98,7 +99,7 @@ func deleteChunk(chunk []Contact, authKey, listID string) {
 				return deleteEmail(authKey, id, listID)
 			}, time.Second*10)
 			if err != nil {
-				log.Printf("Error deleting contact: %v", id)
+				log.Printf("Error deleting contact: %v, %s", err, c.EmailAddress)
 			}
 		}(c.ID)
 	}
@@ -147,7 +148,7 @@ func getListInfo(authKey string, listID string) (ListInfo, error) {
 	return ret, nil
 }
 
-func getChunk(authKey string, listID string, status string) (GetContactsResult, error) {
+func getChunk(authKey string, listID string, status string, size int) (GetContactsResult, error) {
 	url := fmt.Sprintf("https://api.emailoctopus.com/lists/%s/contacts", listID)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -157,6 +158,7 @@ func getChunk(authKey string, listID string, status string) (GetContactsResult, 
 
 	params := req.URL.Query()
 	params.Add("status", status)
+	params.Add("limit", strconv.Itoa(size))
 	req.URL.RawQuery = params.Encode()
 
 	req.Header.Add("Authorization", getAuthReq(authKey))
@@ -192,7 +194,7 @@ func UnsubscribeEmails(authKey string, listID string) error {
 	chunkSize := 100
 
 	for i := 0; i < subscribed; i += chunkSize {
-		chunk, err := getChunk(authKey, listID, "subscribed")
+		chunk, err := getChunk(authKey, listID, "subscribed", chunkSize)
 		if err != nil {
 			return fmt.Errorf("unable to get chunk: %v", err)
 		}
@@ -217,7 +219,7 @@ func CleanUnsubscribedEmails(authKey string, listID string) error {
 	chunkSize := 50
 
 	for i := 0; i < unsubscribed; i += chunkSize {
-		chunk, err := getChunk(authKey, listID, "unsubscribed")
+		chunk, err := getChunk(authKey, listID, "unsubscribed", chunkSize)
 		if err != nil {
 			return fmt.Errorf("unable to get chunk: %v", err)
 		}
