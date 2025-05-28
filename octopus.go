@@ -112,15 +112,15 @@ func deleteChunk(chunk []Contact, authKey, listID string) {
 
 	for _, c := range chunk {
 		wg.Add(1)
-		go func(id string) {
+		go func(contact Contact) {
 			defer wg.Done()
 			err := retryRequest(3, func() error {
-				return deleteEmail(authKey, id, listID)
+				return deleteEmail(authKey, contact.ID, listID)
 			}, time.Second*10)
 			if err != nil {
-				log.Printf("Error deleting contact: %v, %s", err, c.EmailAddress)
+				log.Printf("Error deleting contact: %v, %s", err, contact.EmailAddress)
 			}
-		}(c.ID)
+		}(c)
 	}
 
 	wg.Wait()
@@ -214,6 +214,7 @@ func GetLists(emails []Contact, rows pgx.Rows) ([]UpsertContactPayload, []Contac
 		}
 
 		if _, found := emailMap[email]; found {
+			delete(emailMap, email)
 			continue
 		}
 
