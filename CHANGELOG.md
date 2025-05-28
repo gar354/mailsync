@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/gar354/mailsync/compare/v1.2.0...v1.2.1) (2025-05-28)
+
+
+### Bug Fixes
+
+* unbreak ([4fa892e](https://github.com/gar354/mailsync/commit/4fa892ea1caad29b889e7153df0efcb3f0248bd3))
+
 ## [1.2.0](https://github.com/gar354/mailsync/compare/v1.1.0...v1.2.0) (2025-05-28)
 
 
