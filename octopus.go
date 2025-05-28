@@ -214,8 +214,6 @@ func GetLists(emails []Contact, rows pgx.Rows) ([]UpsertContactPayload, []Contac
 		}
 
 		if _, found := emailMap[email]; found {
-			// Already exists — remove from map
-			delete(emailMap, email)
 			continue
 		}
 
