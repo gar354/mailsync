@@ -50,25 +50,26 @@ func main() {
 	}
 
 	for _, info := range mailconfig {
-		log.Printf("Unsubscribing Emails: %s", info.Name)
-		err = UnsubscribeEmails(emailOctopusAPIKey, info.ID)
+		log.Printf("Processing Grade: %s, grades: %v, list ID: %s", info.Name, info.Grades, info.ID)
+		listInfo, err := GetListInfo(emailOctopusAPIKey, info.ID)
 		if err != nil {
-			log.Printf("unable to unsubscribe emails: %v", err)
+			log.Printf("unable to get list info: %v", err)
 			continue
 		}
+
 		rows, err := connection.QueryGrades(info.Grades)
 		if err != nil {
 			log.Printf("Unable to query grades: %v", err)
 			continue
 		}
-		log.Printf("Subscribing Emails: %s", info.Name)
-		SuscribeEmailsFromDB(emailOctopusAPIKey, info.ID, rows)
-		log.Printf("Cleaning Unsubscribed Emails: %s", info.Name)
-		err = CleanUnsubscribedEmails(emailOctopusAPIKey, info.ID)
-		if err != nil {
-			log.Printf("Unable to clean unsubcribed emails: %v", err)
-			continue
-		}
+		emails, err := GetEmails(emailOctopusAPIKey, info.ID, listInfo)
+
+		upsertList, deleteList, err := GetLists(emails, rows)
+
+		log.Printf("Adding emails: %v", upsertList)
+		SubscribeEmails(emailOctopusAPIKey, info.ID, upsertList)
+		log.Printf("Deleting emails: %v", deleteList)
+		DeleteEmails(emailOctopusAPIKey, info.ID, deleteList)
 		rows.Close()
 	}
 	err = connection.DBClose()

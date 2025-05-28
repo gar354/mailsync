@@ -15,9 +15,10 @@ import (
 )
 
 type Contact struct {
-	EmailAddress string `json:"email_address"`
-	Status       string `json:"status"`
-	ID           string `json:"id"`
+	EmailAddress string         `json:"email_address"`
+	Status       string         `json:"status"`
+	ID           string         `json:"id,omitempty"`
+	Fields       map[string]any `json:"fields"`
 }
 
 type BatchContactsPayload struct {
@@ -36,36 +37,54 @@ type GetContactsResult struct {
 	Paging struct {
 		Next struct {
 			Url           string `json:"url"`
-			StartingAfter string `json:"starting_after"`
-		} `json:"paging"`
-	} `json:"next"`
+			StartingAfter string `json:"starting_after,omitempty"`
+		} `json:"next"`
+	} `json:"paging"`
 }
 
-func SuscribeEmailsFromDB(authKey string, listID string, rows pgx.Rows) {
+type ListInfo struct {
+	Counts []struct {
+		Pending      int `json:"pending"`
+		Subscribed   int `json:"subscribed"`
+		Unsubscribed int `json:"unsubscribed"`
+	} `json:"counts"`
+}
+
+func SubscribeEmails(authKey string, listID string, emails []UpsertContactPayload) {
 	const chunkSize = 50
-	var chunk []UpsertContactPayload
 
-	for rows.Next() {
-		var email, firstName, lastName string
-		if err := rows.Scan(&email, &firstName, &lastName); err != nil {
-			log.Printf("Failed to scan row: %v", err)
-			continue
-		}
-
-		chunk = append(chunk, UpsertContactPayload{EmailAddress: email, Status: "subscribed", Fields: map[string]any{"FirstName": firstName, "LastName": lastName}})
-
-		// When chunk is full, process it
-		if len(chunk) == chunkSize {
-			subscribeChunk(chunk, authKey, listID)
-			chunk = chunk[:0] // clear for next chunk
-			time.Sleep(2 * time.Second)
-		}
-	}
-
-	// Process remaining chunk
-	if len(chunk) > 0 {
+	for i := 0; i < len(emails); i += chunkSize {
+		end := min(len(emails), i+chunkSize)
+		chunk := emails[i:end]
 		subscribeChunk(chunk, authKey, listID)
+		time.Sleep(2 * time.Second)
 	}
+}
+
+func DeleteEmails(authKey string, listID string, emails []Contact) {
+	const chunkSize = 50
+
+	for i := 0; i < len(emails); i += chunkSize {
+		end := min(len(emails), i+chunkSize)
+		chunk := emails[i:end]
+		deleteChunk(chunk, authKey, listID)
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func GetEmails(authKey string, listID string, info ListInfo) ([]Contact, error) {
+	var list []Contact
+	startingAfter := ""
+	for i := 0; i < info.Counts[0].Subscribed; {
+		chunk, err := getChunk(authKey, listID, "subscribed", 100, startingAfter)
+		if err != nil {
+			return list, err
+		}
+		list = append(list, chunk.Data...)
+		startingAfter = chunk.Paging.Next.StartingAfter
+		i += len(chunk.Data)
+	}
+	return list, nil
 }
 
 func subscribeChunk(chunk []UpsertContactPayload, authKey, listID string) {
@@ -108,15 +127,7 @@ func deleteChunk(chunk []Contact, authKey, listID string) {
 	log.Printf("Deleted chunk of %d contacts", len(chunk))
 }
 
-type ListInfo struct {
-	Counts []struct {
-		Pending      int `json:"pending"`
-		Subscribed   int `json:"subscribed"`
-		Unsubscribed int `json:"unsubscribed"`
-	} `json:"counts"`
-}
-
-func getListInfo(authKey string, listID string) (ListInfo, error) {
+func GetListInfo(authKey string, listID string) (ListInfo, error) {
 
 	url := fmt.Sprintf("https://api.emailoctopus.com/lists/%s", listID)
 
@@ -148,7 +159,7 @@ func getListInfo(authKey string, listID string) (ListInfo, error) {
 	return ret, nil
 }
 
-func getChunk(authKey string, listID string, status string, size int) (GetContactsResult, error) {
+func getChunk(authKey string, listID string, status string, size int, startingAfter string) (GetContactsResult, error) {
 	url := fmt.Sprintf("https://api.emailoctopus.com/lists/%s/contacts", listID)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -159,6 +170,9 @@ func getChunk(authKey string, listID string, status string, size int) (GetContac
 	params := req.URL.Query()
 	params.Add("status", status)
 	params.Add("limit", strconv.Itoa(size))
+	if startingAfter != "" {
+		params.Add("starting_after", startingAfter)
+	}
 	req.URL.RawQuery = params.Encode()
 
 	req.Header.Add("Authorization", getAuthReq(authKey))
@@ -184,49 +198,38 @@ func getChunk(authKey string, listID string, status string, size int) (GetContac
 	return ret, nil
 }
 
-func UnsubscribeEmails(authKey string, listID string) error {
-	info, err := getListInfo(authKey, listID)
-	if err != nil {
-		return fmt.Errorf("unable to get list info: %v", err)
+func GetLists(emails []Contact, rows pgx.Rows) ([]UpsertContactPayload, []Contact, error) {
+	var upsertList []UpsertContactPayload
+	var deleteList []Contact
+
+	emailMap := make(map[string]Contact)
+	for _, e := range emails {
+		emailMap[e.EmailAddress] = e
 	}
-	subscribed := info.Counts[0].Subscribed
 
-	chunkSize := 100
-
-	for i := 0; i < subscribed; i += chunkSize {
-		chunk, err := getChunk(authKey, listID, "subscribed", chunkSize)
-		if err != nil {
-			return fmt.Errorf("unable to get chunk: %v", err)
+	for rows.Next() {
+		var email, firstName, lastName string
+		if err := rows.Scan(&email, &firstName, &lastName); err != nil {
+			log.Printf("Failed to scan row: %v", err)
 		}
-		err = retryRequest(3, func() error {
-			return unsubscribeChunk(authKey, listID, chunk.Data)
-		}, time.Second*8)
-		if err != nil {
-			return fmt.Errorf("unable to unsubscribe chunk: %v", err)
+
+		if _, found := emailMap[email]; found {
+			// Already exists — remove from map
+			delete(emailMap, email)
+			continue
 		}
-		time.Sleep(time.Second * 3)
-	}
-	return nil
-}
 
-func CleanUnsubscribedEmails(authKey string, listID string) error {
-	info, err := getListInfo(authKey, listID)
-	if err != nil {
-		return fmt.Errorf("unable to list info : %v", err)
+		// add to the upsert list, does not exist in the list or is updated
+		upsertList = append(upsertList, UpsertContactPayload{
+			EmailAddress: email,
+			Fields:       map[string]any{"FirstName": firstName, "LastName": lastName},
+			Status:       "subscribed",
+		})
 	}
-	unsubscribed := info.Counts[0].Unsubscribed
-
-	chunkSize := 50
-
-	for i := 0; i < unsubscribed; i += chunkSize {
-		chunk, err := getChunk(authKey, listID, "unsubscribed", chunkSize)
-		if err != nil {
-			return fmt.Errorf("unable to get chunk: %v", err)
-		}
-		deleteChunk(chunk.Data, authKey, listID)
-		time.Sleep(time.Second * 3)
+	for _, e := range emailMap {
+		deleteList = append(deleteList, e)
 	}
-	return nil
+	return upsertList, deleteList, nil
 }
 
 func retryRequest(numRetries int, f func() error, waitTime time.Duration) error {
@@ -239,43 +242,6 @@ func retryRequest(numRetries int, f func() error, waitTime time.Duration) error 
 		time.Sleep(waitTime)
 	}
 	return fmt.Errorf("retried %d times, got error: %v", numRetries, err)
-}
-
-func unsubscribeChunk(authKey string, listID string, arr []Contact) error {
-	url := fmt.Sprintf("https://api.emailoctopus.com/lists/%s/contacts/batch", listID)
-
-	for i := range arr {
-		arr[i].Status = "unsubscribed"
-	}
-	payload := BatchContactsPayload{
-		ListID:   listID,
-		Contacts: arr,
-	}
-
-	payloadString, _ := json.Marshal(payload)
-	payloadReader := strings.NewReader(string(payloadString))
-
-	req, err := http.NewRequest("PUT", url, payloadReader)
-	if err != nil {
-		log.Fatalf("Error creating request: %v", err)
-	}
-
-	req.Header.Add("Authorization", getAuthReq(authKey))
-	req.Header.Add("content-type", "application/json")
-
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("error in request response: %v", err)
-	}
-	if res.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(res.Body)
-		if err != nil {
-			return fmt.Errorf("error reading request response: %v", err)
-		}
-		return fmt.Errorf("error in request batch update response: %s, error code: %d", string(body), res.StatusCode)
-	}
-
-	return res.Body.Close()
 }
 
 func upsertEmail(authKey string, payload UpsertContactPayload, listID string) error {
