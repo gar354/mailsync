@@ -53,16 +53,20 @@ func main() {
 		log.Printf("Processing Grade: %s, grades: %v, list ID: %s", info.Name, info.Grades, info.ID)
 		listInfo, err := GetListInfo(emailOctopusAPIKey, info.ID)
 		if err != nil {
-			log.Printf("unable to get list info: %v", err)
+			log.Fatalf("unable to get list info: %v", err)
 			continue
 		}
 
 		rows, err := connection.QueryGrades(info.Grades)
 		if err != nil {
-			log.Printf("Unable to query grades: %v", err)
+			log.Fatalf("Unable to query grades: %v", err)
 			continue
 		}
 		emails, err := GetEmails(emailOctopusAPIKey, info.ID, listInfo)
+		if err != nil {
+			log.Fatalf("Unable to get emails: %v", err)
+			continue
+		}
 
 		upsertList, deleteList, err := GetLists(emails, rows)
 

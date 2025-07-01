@@ -15,10 +15,11 @@ import (
 )
 
 type Contact struct {
-	EmailAddress string         `json:"email_address"`
-	Status       string         `json:"status"`
-	ID           string         `json:"id,omitempty"`
-	Fields       map[string]any `json:"fields"`
+	EmailAddress string `json:"email_address"`
+	Status       string `json:"status"`
+	ID           string `json:"id,omitempty"`
+	// Email octopus has no idea how to actually format "fields", it literally can be any type under the sun, we thankfully don't use fields in this struct
+	// Fields       map[string]any `json:"fields,omitempty"`
 }
 
 type BatchContactsPayload struct {
@@ -68,23 +69,26 @@ func DeleteEmails(authKey string, listID string, emails []Contact) {
 		end := min(len(emails), i+chunkSize)
 		chunk := emails[i:end]
 		deleteChunk(chunk, authKey, listID)
-		time.Sleep(2 * time.Second)
+		time.Sleep(4 * time.Second)
 	}
 }
 
-func GetEmails(authKey string, listID string, info ListInfo) ([]Contact, error) {
-	var list []Contact
+func GetEmails(authKey string, listID string, info ListInfo) (map[string]Contact, error) {
+	emailMap := make(map[string]Contact)
 	startingAfter := ""
-	for i := 0; i < info.Counts[0].Subscribed; {
+	subscribed := info.Counts[0].Subscribed
+	for i := 0; i < subscribed; {
 		chunk, err := getChunk(authKey, listID, "subscribed", 100, startingAfter)
 		if err != nil {
-			return list, err
+			return emailMap, err
 		}
-		list = append(list, chunk.Data...)
+		for _, e := range chunk.Data {
+			emailMap[e.EmailAddress] = e
+		}
 		startingAfter = chunk.Paging.Next.StartingAfter
 		i += len(chunk.Data)
 	}
-	return list, nil
+	return emailMap, nil
 }
 
 func subscribeChunk(chunk []UpsertContactPayload, authKey, listID string) {
@@ -98,7 +102,7 @@ func subscribeChunk(chunk []UpsertContactPayload, authKey, listID string) {
 				return upsertEmail(authKey, c, listID)
 			}, time.Second*10)
 			if err != nil {
-				log.Printf("Error processing contact: %v", c)
+				log.Printf("Error processing contact: %v, err: %v", c, err)
 			}
 		}(contact)
 	}
@@ -198,32 +202,30 @@ func getChunk(authKey string, listID string, status string, size int, startingAf
 	return ret, nil
 }
 
-func GetLists(emails []Contact, rows pgx.Rows) ([]UpsertContactPayload, []Contact, error) {
+func GetLists(emailMap map[string]Contact, rows pgx.Rows) ([]UpsertContactPayload, []Contact, error) {
 	var upsertList []UpsertContactPayload
 	var deleteList []Contact
-
-	emailMap := make(map[string]Contact)
-	for _, e := range emails {
-		emailMap[e.EmailAddress] = e
-	}
 
 	for rows.Next() {
 		var email, firstName, lastName string
 		if err := rows.Scan(&email, &firstName, &lastName); err != nil {
-			log.Printf("Failed to scan row: %v", err)
+			return nil, nil, fmt.Errorf("failed to scan row: %w", err)
 		}
 
-		if _, found := emailMap[email]; found {
-			delete(emailMap, email)
+		normalizedEmail := strings.ToLower(strings.TrimSpace(email))
+		if _, found := emailMap[normalizedEmail]; found {
+			delete(emailMap, normalizedEmail)
 			continue
 		}
 
-		// add to the upsert list, does not exist in the list or is updated
 		upsertList = append(upsertList, UpsertContactPayload{
-			EmailAddress: email,
+			EmailAddress: normalizedEmail,
 			Fields:       map[string]any{"FirstName": firstName, "LastName": lastName},
 			Status:       "subscribed",
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("rows iteration error: %w", err)
 	}
 	for _, e := range emailMap {
 		deleteList = append(deleteList, e)
@@ -292,7 +294,8 @@ func deleteEmail(authKey string, ID string, listID string) error {
 	if err != nil {
 		return fmt.Errorf("error in delete request response: %v", err)
 	}
-	if res.StatusCode != http.StatusOK {
+	// NoContent status is returned when deletion is succesful: https://emailoctopus.com/api-documentation/v2#tag/Contact/operation/api_lists_list_idcontacts_contact_id_delete
+	if res.StatusCode != http.StatusNoContent {
 		body, err := io.ReadAll(res.Body)
 		if err != nil {
 			return fmt.Errorf("error reading request response: %v", err)
