@@ -3,7 +3,7 @@ module github.com/gar354/blackbaud-mailsync
 go 1.24.3
 
 require (
-	github.com/jackc/pgx/v5 v5.7.5
+	github.com/jackc/pgx/v5 v5.7.6
 	github.com/joho/godotenv v1.5.1
 )
 
